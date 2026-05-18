@@ -1,0 +1,71 @@
+# a_stock_quant configuration
+# Edit this file to customize monitoring behavior
+
+# Stock watchlist — 6-digit codes or Chinese names
+watchlist:
+  - "601619"    # 平安银行
+  # - "600519"  # 贵州茅台
+  # - "300750"  # 宁德时代
+
+# Polling interval in seconds (3–60 recommended)
+poll_interval_seconds: 5
+
+# Only monitor during A-stock trading hours (9:30–11:30, 13:00–15:00 Beijing time)
+trading_hours_only: true
+
+# Alert conditions
+alerts:
+  price_change_pct:
+    enabled: true
+    threshold: 3.0          # trigger when |change_pct| >= 3%
+    cooldown_seconds: 60
+
+  volume_spike:
+    enabled: false
+    multiplier: 3.0          # trigger when volume >= 3x 20-day average
+    cooldown_seconds: 300
+
+  turnover_pct:
+    enabled: true
+    threshold: 5.0           # trigger when turnover_pct >= 5%
+    cooldown_seconds: 60
+
+  limit_up_down_proximity:
+    enabled: true
+    within_pct: 1.0          # trigger when within 1% of limit
+    cooldown_seconds: 120
+
+  indicator_signals:
+    enabled: false
+    rules:
+      - "ma_golden_cross"
+      - "ma_death_cross"
+      - "rsi_overbought"
+      - "rsi_oversold"
+      - "macd_golden_cross"
+      - "macd_death_cross"
+    cooldown_seconds: 300
+
+# Database
+database:
+  path: "data/snapshots.db"
+  retention_days: 30
+
+# Web dashboard
+web:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8765
+
+# Notification channels
+notifications:
+  console:
+    enabled: true
+
+  sound:
+    enabled: false
+
+  webhook:
+    enabled: false
+    dingtalk_url: null
+    wechat_work_url: null

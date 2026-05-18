@@ -1,0 +1,2 @@
+[console_scripts]
+astock = a_stock_quant.cli.main:app
