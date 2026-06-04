@@ -1,0 +1,9 @@
+# Feishu Bot extra dependencies
+# Install alongside the main project:
+#   pip install -e .
+#   pip install -r feishu_bot/requirements.txt
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+requests>=2.32.4
+python-dotenv>=1.1.0
