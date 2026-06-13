@@ -1493,6 +1493,59 @@ def _terminate_current_process() -> None:
     os.kill(os.getpid(), signal.SIGTERM)
 
 
+@app.get("/scanner/screen", dependencies=[Depends(require_auth)])
+async def screen_stocks(
+    strategy: str = Query(..., description="Strategy key(s): comma-separated for multiple, e.g. 'ichimoku,elliott-wave'"),
+    target_date: str | None = Query(None, description="Single trading date (YYYY-MM-DD). Omit when start_date/end_date set."),
+    start_date: str | None = Query(None, description="Range start (YYYY-MM-DD). Requires end_date."),
+    end_date: str | None = Query(None, description="Range end (YYYY-MM-DD). Requires start_date."),
+    universe: str = Query("csi300", description="Stock universe: csi300, csi500, all_a, sp500, or custom"),
+    max_stocks: int | None = Query(None, description="Cap number of stocks (useful for all_a universe)"),
+    codes: str | None = Query(None, description="Comma-separated explicit stock codes (overrides universe)"),
+    interval: str = Query("1D", description="Bar interval: 1D (default), 1H, 30m, 15m, 5m"),
+):
+    """Scan a universe with one or more strategies.
+
+    Supports two date modes:
+      - Single-date: pass ``target_date``
+      - Date range: pass ``start_date`` + ``end_date``
+
+    Multi-strategy: pass comma-separated strategy keys, e.g.
+    ``strategy=ichimoku,elliott-wave,technical-basic``.
+    Data is fetched once and shared across all strategies.
+    """
+    from src.tools.stock_scanner_tool import scan_stocks
+
+    # Parse strategies: comma-separated list
+    strategy_keys = [s.strip() for s in strategy.split(",") if s.strip()]
+    if not strategy_keys:
+        raise HTTPException(status_code=400, detail="strategy must be non-empty")
+
+    code_list = None
+    if codes:
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+        if not code_list:
+            raise HTTPException(status_code=400, detail="codes must be a non-empty list when provided")
+
+    try:
+        result = scan_stocks(
+            strategy=strategy_keys if len(strategy_keys) > 1 else strategy_keys[0],
+            target_date=target_date,
+            start_date=start_date,
+            end_date=end_date,
+            universe=universe,
+            codes=code_list,
+            include_flat=False,
+            max_stocks=max_stocks,
+            interval=interval,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Scanner failed: {exc}")
+
+
 @app.post("/system/shutdown", dependencies=[Depends(require_auth)])
 async def shutdown_local_api(background_tasks: BackgroundTasks, request: Request):
     """Shut down the local API server when requested from loopback clients."""
@@ -2984,6 +3037,12 @@ async def stop_runner_endpoint(payload: LiveRunnerControlRequest):
 # ============================================================================
 # Alpha Zoo routes (Web UI) — defined in src/api/alpha_routes.py
 # ============================================================================
+
+# When run as ``python -m api_server`` the module name is __main__;
+# register_alpha_routes looks for ``api_server`` in sys.modules.
+import sys as _sys  # noqa: E402
+if "api_server" not in _sys.modules:
+    _sys.modules["api_server"] = _sys.modules[__name__]
 
 from src.api.alpha_routes import register_alpha_routes  # noqa: E402
 register_alpha_routes(app)

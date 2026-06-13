@@ -7,8 +7,10 @@ import base64
 import json
 import os
 import re
+import requests
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -26,8 +28,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 from feishu_bot.client import FeishuClient
+from feishu_bot.live_client import LiveClient
 from feishu_bot.parser import parse_command
 from feishu_bot.runner import run_analysis_async
+from feishu_bot.pdf_generator import generate_pdf
 
 app = FastAPI(title="Vibe-Trading Feishu Bot")
 
@@ -48,27 +52,84 @@ feishu_client = FeishuClient(FEISHU_APP_ID, FEISHU_APP_SECRET)
 # Simple in-memory session: sender_open_id -> last_stock_name
 _user_last_stock: dict[str, str] = {}
 
-# Active analysis tasks: chat_id -> {"stop_event": threading.Event(), "prompt": str}
+# Active analysis tasks: chat_id -> {"stop_event": Event, "prompt": str, "created_at": float}
 _active_tasks: dict[str, dict] = {}
 
+# User chat history for multi-turn conversation: sender_id -> [{"role": "user|assistant", "content": str}]
+_user_chat_history: dict[str, list[dict]] = {}
+_MAX_HISTORY_TURNS = 10
 
-def _run_analysis_background(chat_id: str, prompt: str, max_iter: int = 50):
-    """Run analysis in a background thread and send result to Feishu."""
+
+def _build_prompt_with_history(user_text: str, history: list[dict]) -> str:
+    """Build a prompt that includes conversation history for context."""
+    if not history:
+        return user_text
+    context_lines = []
+    for msg in history[-_MAX_HISTORY_TURNS:]:
+        role = "用户" if msg["role"] == "user" else "助手"
+        context_lines.append(f"{role}: {msg['content']}")
+    context = "\n".join(context_lines)
+    return f"以下是对话历史（请结合上下文回答）：\n{context}\n\n当前问题：{user_text}"
+
+
+def _update_history(sender_id: str, user_text: str, assistant_text: str):
+    """Append a user-assistant exchange to the conversation history."""
+    if sender_id not in _user_chat_history:
+        _user_chat_history[sender_id] = []
+    _user_chat_history[sender_id].append({"role": "user", "content": user_text})
+    _user_chat_history[sender_id].append({"role": "assistant", "content": assistant_text})
+    # Trim to max turns
+    if len(_user_chat_history[sender_id]) > _MAX_HISTORY_TURNS * 2:
+        _user_chat_history[sender_id] = _user_chat_history[sender_id][-_MAX_HISTORY_TURNS * 2:]
+
+
+def _run_analysis_background(chat_id: str, sender_id: str, user_text: str, prompt: str, max_iter: int = 50):
+    """Run analysis in a background thread and send result to Feishu.
+
+    Guarantees at most one active task per chat_id:
+      - If a previous task exists, it is cancelled first.
+      - If the same prompt is already running, skips duplicate.
+    """
+    # 1. De-duplicate: same prompt already running -> skip
+    existing = _active_tasks.get(chat_id)
+    if existing and existing.get("prompt") == prompt and not existing["stop_event"].is_set():
+        print(f"[DEBUG] Duplicate task skipped for chat {chat_id}: {prompt[:50]}")
+        return
+
+    # 2. Cancel any previous task for this chat
+    if existing:
+        print(f"[DEBUG] Cancelling previous task for chat {chat_id}")
+        existing["stop_event"].set()
+        # Wait briefly for the old subprocess to die
+        time.sleep(0.5)
+
+    # 3. Register new task
     stop_event = threading.Event()
-    _active_tasks[chat_id] = {"stop_event": stop_event, "prompt": prompt}
+    task_entry = {"stop_event": stop_event, "prompt": prompt, "created_at": time.time()}
+    _active_tasks[chat_id] = task_entry
 
     def background_task():
         try:
             result = run_analysis_async(prompt=prompt, max_iter=max_iter, stop_event=stop_event)
+            # Only send result if this task is still the current one for the chat
+            if _active_tasks.get(chat_id) is not task_entry:
+                print(f"[DEBUG] Task superseded for chat {chat_id}, skipping result send")
+                return
             _send_analysis_result(chat_id, result)
+            # Update conversation history with the assistant's reply
+            assistant_text = result.get("content", "") or result.get("reason", "")
+            _update_history(sender_id, user_text, assistant_text)
         except Exception as e:
             traceback.print_exc()
-            feishu_client.send_text_card(
-                chat_id=chat_id,
-                text=f"❌ 分析过程中出现错误：\n```\n{str(e)}\n```",
-            )
+            if _active_tasks.get(chat_id) is task_entry:
+                feishu_client.send_text_card(
+                    chat_id=chat_id,
+                    text=f"❌ 分析过程中出现错误：\n```\n{str(e)}\n```",
+                )
         finally:
-            _active_tasks.pop(chat_id, None)
+            # Only pop if this task is still registered
+            if _active_tasks.get(chat_id) is task_entry:
+                _active_tasks.pop(chat_id, None)
 
     threading.Thread(target=background_task, daemon=True).start()
 
@@ -78,21 +139,6 @@ def _run_analysis_background(chat_id: str, prompt: str, max_iter: int = 50):
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-def _run_analysis_background(chat_id: str, prompt: str, max_iter: int = 50):
-    """Run analysis in a background thread and send result to Feishu."""
-    def background_task():
-        try:
-            result = run_analysis_async(prompt=prompt, max_iter=max_iter)
-            _send_analysis_result(chat_id, result)
-        except Exception as e:
-            traceback.print_exc()
-            feishu_client.send_text_card(
-                chat_id=chat_id,
-                text=f"❌ 分析过程中出现错误：\n```\n{str(e)}\n```",
-            )
-    threading.Thread(target=background_task, daemon=True).start()
 
 
 def _analysis_prompt(stock: str, analysis_type: str) -> str:
@@ -180,7 +226,8 @@ async def _handle_feishu_event(request: Request) -> JSONResponse:
             except Exception as e:
                 print(f"[ERROR] Failed to send message to Feishu: {e}")
                 traceback.print_exc()
-            _run_analysis_background(chat_id, prompt)
+            # Card action has no sender_id in context; pass empty string for history
+            _run_analysis_background(chat_id, "", prompt, prompt)
 
         threading.Thread(target=_handle_card_action, daemon=True).start()
         return JSONResponse({"code": 0, "msg": "ok"})
@@ -256,6 +303,8 @@ async def _handle_feishu_event(request: Request) -> JSONResponse:
             return JSONResponse({"code": 0, "msg": "ok"})
 
         prompt = _analysis_prompt(stock, analysis_type)
+        history = _user_chat_history.get(sender_id, [])
+        full_prompt = _build_prompt_with_history(prompt, history)
         try:
             feishu_client.send_text_card(
                 chat_id=chat_id,
@@ -269,24 +318,27 @@ async def _handle_feishu_event(request: Request) -> JSONResponse:
             print(f"[ERROR] Failed to send message to Feishu: {e}")
             traceback.print_exc()
 
-        _run_analysis_background(chat_id, prompt)
+        _run_analysis_background(chat_id, sender_id, prompt, full_prompt)
         return JSONResponse({"code": 0, "msg": "ok"})
 
     if command_type == "run":
-        prompt = args.get("prompt", "")
+        user_text = args.get("prompt", "")
+        history = _user_chat_history.get(sender_id, [])
+        full_prompt = _build_prompt_with_history(user_text, history)
         try:
             feishu_client.send_text_card(
                 chat_id=chat_id,
                 text=f"📊 收到请求：\n"
-                     f"**内容**: {prompt[:200]}{'...' if len(prompt) > 200 else ''}\n"
+                     f"**内容**: {user_text[:200]}{'...' if len(user_text) > 200 else ''}\n"
                      f"⏳ 正在启动 Vibe-Trading 分析，请稍候...\n"
-                     f"💡 如需终止，请回复 **终止**",
+                     f"💡 如需终止，请回复 **终止**\n"
+                     f"🧹 如需清空对话历史，请回复 **清空**",
             )
         except Exception as e:
             print(f"[ERROR] Failed to send message to Feishu: {e}")
             traceback.print_exc()
 
-        _run_analysis_background(chat_id, prompt, args.get("max_iter", 50))
+        _run_analysis_background(chat_id, sender_id, user_text, full_prompt, args.get("max_iter", 50))
         return JSONResponse({"code": 0, "msg": "ok"})
 
     if command_type == "stop":
@@ -308,6 +360,76 @@ async def _handle_feishu_event(request: Request) -> JSONResponse:
                 )
             except Exception as e:
                 print(f"[ERROR] Failed to send message: {e}")
+        return JSONResponse({"code": 0, "msg": "ok"})
+
+    if command_type == "clear":
+        _user_chat_history.pop(sender_id, None)
+        try:
+            feishu_client.send_text_card(
+                chat_id=chat_id,
+                text="🧹 对话历史已清空。",
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to send clear confirmation: {e}")
+        return JSONResponse({"code": 0, "msg": "ok"})
+
+    if command_type == "chat":
+        try:
+            feishu_client.send_text_card(
+                chat_id=chat_id,
+                text="👋 你好！我是 **Vibe-Trading 投研机器人**。\n\n"
+                     "我可以帮你：\n"
+                     "• 分析个股基本面 / 技术面 / 新闻舆情\n"
+                     "• 综合投研分析（多 Agent 辩论）\n"
+                     "• 策略回测与代码生成\n"
+                     "• 实盘交易状态查询与控制\n\n"
+                     "**直接发送股票名称**（如：贵州茅台、000001）即可开始，"
+                     "或发送 `帮助` 查看详细用法。",
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to send chat reply: {e}")
+        return JSONResponse({"code": 0, "msg": "ok"})
+
+    if command_type == "live":
+        action = args.get("action", "")
+        live_client = LiveClient()
+        try:
+            if action == "status":
+                data = live_client.get_status()
+                text = LiveClient.format_status(data)
+            elif action == "start":
+                data = live_client.start_runner()
+                ok = data.get("status") != "error"
+                text = f"🟢 **实盘 Runner 启动**\n{'成功' if ok else '失败: ' + data.get('error', '未知错误')}"
+            elif action == "stop":
+                data = live_client.stop_runner()
+                ok = data.get("status") != "error"
+                text = f"🔴 **实盘 Runner 停止**\n{'成功' if ok else '失败: ' + data.get('error', '未知错误')}"
+            elif action == "halt":
+                data = live_client.halt()
+                text = "🛑 **紧急停止已触发**\n全局 kill switch 已启动，所有订单将被拒绝。"
+            elif action == "resume":
+                data = live_client.resume()
+                text = "✅ **紧急停止已解除**\n实盘交易已恢复。"
+            else:
+                text = "⚠️ 未知 live 命令。支持：状态、启动、停止、紧急停止、恢复。"
+            feishu_client.send_text_card(chat_id=chat_id, text=text)
+        except requests.exceptions.ConnectionError:
+            feishu_client.send_text_card(
+                chat_id=chat_id,
+                text="❌ **无法连接 API Server**\n"
+                     "请先启动 API Server：\n"
+                     "```bash\n"
+                     "cd /home/liucai/Vibe-Trading/agent\n"
+                     "python -m api_server\n"
+                     "```",
+            )
+        except Exception as e:
+            print(f"[ERROR] Live command failed: {e}")
+            feishu_client.send_text_card(
+                chat_id=chat_id,
+                text=f"❌ Live 命令执行失败：\n```\n{str(e)}\n```",
+            )
         return JSONResponse({"code": 0, "msg": "ok"})
 
     if command_type == "help":
@@ -395,7 +517,19 @@ def _send_analysis_result(chat_id: str, result: dict):
     except Exception as e:
         print(f"[ERROR] Failed to send result card: {e}")
 
-    # 3. Try to upload and send the .md file
+    # 3. Generate PDF report
+    pdf_path = None
+    try:
+        pdf_path = generate_pdf(
+            content=text,
+            title="TradingAgents 投研报告",
+            stock=prompt[:30] if prompt else "analysis",
+        )
+        print(f"[INFO] PDF report generated: {pdf_path}")
+    except Exception as e:
+        print(f"[ERROR] Failed to generate PDF: {e}")
+
+    # 4. Try to upload and send the .md file
     if md_path and md_path.exists():
         try:
             file_key = feishu_client.upload_file(str(md_path))
@@ -405,13 +539,15 @@ def _send_analysis_result(chat_id: str, result: dict):
         except Exception as e:
             print(f"[ERROR] Failed to send file: {e}")
 
-        # 4. Always tell user the local path
+        # 5. Always tell user the local path
         try:
+            pdf_hint = f"PDF 路径：`{pdf_path}`\n" if pdf_path else ""
             feishu_client.send_text_card(
                 chat_id=chat_id,
                 text=f"📎 **完整报告已保存**\n"
-                     f"本地路径：`{md_path}`\n"
-                     f"（如需查看完整内容，可直接在服务器上打开此文件）",
+                     f"Markdown 路径：`{md_path}`\n"
+                     f"{pdf_hint}"
+                     f"（如需查看完整内容，可直接在服务器上打开）",
             )
         except Exception as e:
             print(f"[ERROR] Failed to send file path: {e}")
@@ -441,11 +577,20 @@ def _help_text() -> str:
         "`回测 茅台 2024-01-01 到 2024-12-31`\n"
         "`计算 000001.SZ 的夏普比率`\n"
         "`帮我写一个突破策略`\n\n"
+        "**实盘交易控制**（需先启动 API Server）：\n"
+        "`live 状态` — 查看授权/持仓/Runner 状态\n"
+        "`live 启动` — 启动实盘 Runner\n"
+        "`live 停止` — 停止实盘 Runner\n"
+        "`live 紧急停止` — 触发 kill switch\n"
+        "`live 恢复` — 解除紧急停止\n\n"
+        "**多轮对话**：\n"
+        "机器人会自动记住最近 10 轮对话历史，结合上下文回答。\n"
+        "回复 `清空` / `重置` 可清除对话历史。\n\n"
         "**终止分析**：\n"
         "分析运行期间，回复 `终止` / `停止` / `取消` 即可强制结束\n\n"
         "**说明**：\n"
         "- Vibe-Trading 是通用金融研究 Agent\n"
-        "- 支持股票分析、策略回测、代码生成等\n"
+        "- 支持股票分析、策略回测、代码生成、实盘交易\n"
         "- 分析耗时 1–5 分钟不等\n\n"
         "**帮助**：发送 `帮助` 查看本消息"
     )

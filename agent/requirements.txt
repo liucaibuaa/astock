@@ -55,3 +55,6 @@ ddgs>=6.0.0
 jinja2>=3.1.0
 matplotlib>=3.7.0
 weasyprint>=60.0
+
+# Terminal & Bot PDF Reports
+fpdf2>=2.8.0

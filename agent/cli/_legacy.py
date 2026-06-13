@@ -1335,6 +1335,47 @@ def _print_result(result: dict, elapsed: float, *, no_rich: bool = False) -> Non
         console.print(f"\n{content}")
 
 
+def _generate_pdf_from_result(result: dict, elapsed: float) -> None:
+    """Generate a PDF report from the CLI result and save it locally."""
+    try:
+        import sys
+        project_root = Path(__file__).resolve().parents[2]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        from feishu_bot.pdf_generator import generate_pdf
+
+        status = result.get("status", "unknown")
+        content = result.get("content", "").strip()
+        run_dir = result.get("run_dir")
+        prompt = result.get("prompt", "")
+
+        # Build plain-text report
+        report_lines = [
+            f"状态: {status.upper()}",
+            f"耗时: {_format_seconds(elapsed)}",
+        ]
+        if result.get("run_id"):
+            report_lines.append(f"Run ID: {result['run_id']}")
+        if result.get("reason"):
+            report_lines.append(f"原因: {result['reason']}")
+        report_lines.append("")
+        report_lines.append(content)
+        report_text = "\n".join(report_lines)
+
+        # Save to run_dir if available, otherwise project reports/
+        output_dir = run_dir if run_dir else str(project_root / "reports")
+        pdf_path = generate_pdf(
+            content=report_text,
+            title="Vibe-Trading CLI 分析报告",
+            stock=prompt[:30] if prompt else "analysis",
+            output_dir=output_dir,
+        )
+        print(f"[PDF] Report saved: {pdf_path}")
+    except Exception as e:
+        # Fail silently — PDF is a bonus, not a requirement
+        print(f"[PDF] Generation skipped: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -1376,7 +1417,11 @@ def cmd_run(prompt: str, max_iter: int, *, json_mode: bool = False, no_rich: boo
     if json_mode:
         _print_json_result(result)
         return _result_exit_code(result)
-    _print_result(result, time.perf_counter() - start, no_rich=no_rich)
+    elapsed = time.perf_counter() - start
+    _print_result(result, elapsed, no_rich=no_rich)
+    if not json_mode:
+        _generate_pdf_from_result(result, elapsed)
+
     if result.get("run_id"):
         tip = f"--show {result['run_id']}  |  --continue {result['run_id']} \"...\"  |  --code {result['run_id']}  |  --pine {result['run_id']}"
         if no_rich:
@@ -1441,7 +1486,9 @@ def cmd_continue(
         if json_mode:
             _print_json_result(result)
             return _result_exit_code(result)
-        _print_result(result, time.perf_counter() - start, no_rich=True)
+        elapsed = time.perf_counter() - start
+        _print_result(result, elapsed, no_rich=True)
+        _generate_pdf_from_result(result, elapsed)
         return _result_exit_code(result)
 
     console.print(f"[dim]Continue {run_id}:[/dim] {prompt[:120]}\n")
@@ -1461,7 +1508,9 @@ def cmd_continue(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
         return EXIT_RUN_FAILED
-    _print_result(result, time.perf_counter() - start)
+    elapsed = time.perf_counter() - start
+    _print_result(result, elapsed)
+    _generate_pdf_from_result(result, elapsed)
     return _result_exit_code(result)
 
 

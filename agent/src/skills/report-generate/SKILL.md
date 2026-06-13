@@ -10,6 +10,16 @@ category: tool
 
 Generate structured, professional-grade financial research reports. Follow the conventions used by securities firms and asset managers, and output complete Markdown reports that can be used directly for investment research reference.
 
+### 🚨 大输出自动落盘 (防截断 · 最高优先级)
+**当生成的完整报告预计超过 ~2000 汉字或 ~3000 tokens 时,禁止直接在聊天中输出全部内容。**
+必须改为:
+1. 使用 `Write` 工具将完整报告写入文件:
+   - 路径:`/home/liucai/Vibe-Trading/reports/`
+   - 若无 `/home/liucai/Vibe-Trading/reports/` 目录则先创建
+2. 在聊天中**仅回复**一条简短的「报告已生成」摘要,固定格式:
+3. **绝对不要**将完整报告粘贴进聊天回复——即使你“觉得能装下”。
+此规则优先于下方所有输出格式,一旦触发即覆盖。
+
 ## Report Types and Structure
 
 ### Type Classification

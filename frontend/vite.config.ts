@@ -10,6 +10,7 @@ const PROXY_PATHS = [
   "/settings/data-sources",
   "/upload",
   "/shadow-reports",
+  "/scanner",
 ];
 
 export default defineConfig(({ mode }) => {

@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, ScanLine } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
@@ -13,6 +13,7 @@ const APP_VERSION = "v0.1.8";
 const NAV = [
   { to: "/", icon: BarChart3, label: "Home" },
   { to: "/agent", icon: Bot, label: "Agent" },
+  { to: "/scanner", icon: ScanLine, label: "Scanner" },
   { to: "/alpha-zoo", icon: Layers, label: "Alpha Zoo" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/correlation", icon: BarChart3, label: "Correlation Matrix" },

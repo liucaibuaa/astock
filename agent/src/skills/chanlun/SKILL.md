@@ -108,3 +108,9 @@ czsc 接受 `List[RawBar]`，每个 RawBar 包含：
 ## 实现方式
 
 使用 [czsc](https://github.com/waditu/czsc) 库（v0.9.68+），基于纯 Python 实现（可选 Rust 加速后端）。支持增量更新，适合实时分析。
+
+## 生成 `signal_engine.py` 时的注意事项
+
+- 所有辅助函数（如将 DataFrame 转成 RawBar、判断买卖点）必须写成**类外的普通函数**，不要放在 `SignalEngine` 类内部，也不要使用 `@staticmethod` / `@classmethod` 装饰器。
+- Vibe-Trading 的 `SignalEngine` 安全校验会拒绝类内装饰器；一旦使用会报错：
+  > `Decorators are not allowed on function '_current_bi_direction'`

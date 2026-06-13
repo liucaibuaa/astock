@@ -120,10 +120,17 @@ class SignalEngine:
                 result[code] = signal
                 continue
 
-            # 逐根K线分析，记录每根K线的信号
-            c = CZSC(bars[:30], get_signals=_get_signals)
+            # czsc >= 0.10 removed ``get_signals`` from CZSC constructor.
+            # We initialise with 30 bars, populate signals manually, then
+            # update bar-by-bar and refresh signals each step.
+            c = CZSC(bars[:30])
+            c.signals.update(_get_signals(c))
+            if self._evaluate_signals(c) != 0:
+                signal.iloc[29] = self._evaluate_signals(c)
+
             for bar in bars[30:]:
                 c.update(bar)
+                c.signals.update(_get_signals(c))
                 sig = self._evaluate_signals(c)
                 if sig != 0:
                     signal.iloc[bar.id] = sig

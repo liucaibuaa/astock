@@ -7,11 +7,19 @@ from typing import Optional
 
 
 # Common Chinese stock names that might be mentioned in normal chat
-# In production, this should be replaced with a real stock database lookup
-NON_STOCK_PHRASES = {"你好", "在吗", "谢谢", "哈喽", "hi", "hello", "test", "测试", "好的", "收到"}
+NON_STOCK_PHRASES = {
+    "你好", "在吗", "谢谢", "哈喽", "hi", "hello", "test", "测试",
+    "好的", "收到", "嗯", "哦", "啊", "好", "行", "ok", "yes", "no",
+    "拜拜", "再见", "稍等", "等一下", "来了", "在的",
+    # Common words that should NOT be treated as stock names
+    "状态", "情况", "结果", "问题", "内容", "数据", "信息",
+    "报告", "分析", "预测", "建议", "结论", "原因", "方法",
+    "今天", "明天", "昨天", "现在", "最近", "目前", "当前",
+    "上涨", "下跌", "涨跌", "涨", "跌", "买", "卖",
+    "买入", "卖出", "持有", "观望", "清仓", "减仓", "加仓",
+}
 
 # Prefixes users naturally add before a stock name.
-# Sorted by length DESC so longer prefixes match first.
 STOCK_PREFIXES = [
     "请你帮我分析", "请帮我分析", "请帮我查", "请帮我预测",
     "帮我分析", "帮我看看", "帮我查", "帮我预测", "帮我",
@@ -33,6 +41,16 @@ SPECIFIC_PARAM_MARKERS = [
     " bullish", "bearish", "long", "short", "buy", "sell",
 ]
 
+# Analysis-intent words: if these appear after a stock name, user wants direct analysis
+ANALYSIS_INTENT_WORDS = [
+    "是否", "可以", "能不能", "能", "适合", "值得", "建议", "应该",
+    "怎么", "如何", "为什么", "什么", "多少", "好吗", "行吗", "对吗",
+    "短线", "长线", "波段", "持股", "买入", "卖出", "持有", "建仓",
+    "加仓", "减仓", "清仓", "止盈", "止损", "解套",
+    "涨跌", "上涨", "下跌", "涨吗", "跌吗", "会涨", "会跌",
+    "看好", "看空", "观望", "注意", "风险", "机会",
+]
+
 
 def _extract_stock_code(text: str) -> Optional[str]:
     """Extract 6-digit stock code (with optional suffix)."""
@@ -45,7 +63,12 @@ def _extract_stock_code(text: str) -> Optional[str]:
 def _extract_stock_name(text: str) -> Optional[str]:
     """Extract Chinese stock name from text.
 
-    Looks for 2-6 Chinese characters that are likely a stock name.
+    Strategy:
+      1. Strip common prefixes.
+      2. If the remainder is a clean 2-6 Chinese char name, return it.
+      3. Try to match the LEADING 2-6 Chinese chars (stock names usually
+         appear at the beginning after prefixes).
+      4. Fall back to matching trailing Chinese chars.
     """
     # Remove prefixes to find the core stock name
     temp = text
@@ -58,8 +81,15 @@ def _extract_stock_name(text: str) -> Optional[str]:
     if re.fullmatch(r"[一-龥]{2,6}", temp) and temp not in NON_STOCK_PHRASES:
         return temp
 
-    # Also try: look for the last 2-6 Chinese chars in the stripped sentence
-    # This handles "看一下贵州茅台" -> "贵州茅台"
+    # PRIORITY: match the LEADING 2-6 Chinese chars.
+    # This handles "京泉华是否可以做超短线" -> "京泉华"
+    m = re.match(r"([一-龥]{2,6})", temp)
+    if m:
+        candidate = m.group(1)
+        if candidate not in NON_STOCK_PHRASES:
+            return candidate
+
+    # Fallback: look for the last 2-6 Chinese chars
     m = re.search(r"([一-龥]{2,6})(?:\s*$|\s+的|\s+怎么样)", temp)
     if m:
         candidate = m.group(1)
@@ -70,11 +100,40 @@ def _extract_stock_name(text: str) -> Optional[str]:
 
 
 def _has_specific_params(text: str) -> bool:
-    """Check if the text contains specific analysis parameters."""
+    """Check if the text contains specific analysis parameters or intent."""
     lower = text.lower()
     for marker in SPECIFIC_PARAM_MARKERS:
-        if marker in lower:
+        if marker.lower() in lower:
             return True
+    # Analysis-intent words also count as specific params
+    for word in ANALYSIS_INTENT_WORDS:
+        if word in lower:
+            return True
+    return False
+
+
+def _is_general_chat(text: str) -> bool:
+    """Detect general chit-chat messages that are not stock queries."""
+    cleaned = text.strip()
+    lower = cleaned.lower()
+
+    # Exact match common greetings
+    if lower in NON_STOCK_PHRASES:
+        return True
+
+    # Very short messages (1-2 chars) that are not stock codes
+    if len(cleaned) <= 2 and not re.fullmatch(r"\d{6}", cleaned):
+        return True
+
+    # Greeting patterns
+    greeting_patterns = [
+        r"^(你好|在吗|哈喽|hi|hello|hey|早上好|中午好|晚上好|谢谢|感谢|辛苦了)",
+        r"^(拜拜|再见|拜|回见|下次见)",
+    ]
+    for pat in greeting_patterns:
+        if re.search(pat, lower):
+            return True
+
     return False
 
 
@@ -147,6 +206,10 @@ def parse_command(text: str) -> Optional[dict]:
     if lower in ("终止", "停止", "取消", "中止", "结束", "stop", "cancel", "quit"):
         return {"type": "stop", "args": {}}
 
+    # Clear history command
+    if lower in ("清空", "重置", "清除", "clear", "reset"):
+        return {"type": "clear", "args": {}}
+
     # Help commands (direct)
     if lower in ("帮助", "help", "?", "怎么用", "指令"):
         return {"type": "help", "args": {}}
@@ -160,6 +223,23 @@ def parse_command(text: str) -> Optional[dict]:
     menu = parse_menu_selection(cleaned)
     if menu:
         return menu
+
+    # Live trading commands (must be checked BEFORE stock extraction)
+    # Support both "live status" and "/live status"
+    live_text = re.sub(r"^/", "", lower)
+    live_match = re.match(r"live(?:\s+(.+))?", live_text)
+    if live_match and (live_match.group(1) or live_text == "live"):
+        sub = live_match.group(1).strip()
+        sub_map = {
+            "状态": "status", "status": "status",
+            "启动": "start", "start": "start",
+            "停止": "stop", "stop": "stop",
+            "紧急停止": "halt", "halt": "halt", "急停": "halt",
+            "恢复": "resume", "resume": "resume",
+        }
+        for key, action in sub_map.items():
+            if sub == key or sub.startswith(key):
+                return {"type": "live", "args": {"action": action}}
 
     # Try to extract a stock code or name
     stock = _extract_stock_code(cleaned) or _extract_stock_name(cleaned)
@@ -176,6 +256,10 @@ def parse_command(text: str) -> Optional[dict]:
             }
         # Otherwise, show the interactive menu
         return {"type": "stock_menu", "args": {"stock": stock}}
+
+    # General chit-chat
+    if _is_general_chat(cleaned):
+        return {"type": "chat", "args": {"text": cleaned}}
 
     # No stock detected -> treat as free-form prompt
     return {

@@ -68,6 +68,7 @@ class SignalEngine:
 - Do not include an `if __name__ == "__main__"` block
 - Pure pandas / numpy implementation, with no external signal libraries
 - Output plain Python code, not Markdown fences
+- **Do not use `@staticmethod`, `@classmethod`, or any decorators inside `SignalEngine`. Place helper functions as module-level regular functions outside the class.**
 
 ## Quality Checklist
 

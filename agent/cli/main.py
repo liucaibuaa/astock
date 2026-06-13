@@ -32,6 +32,9 @@ from cli.intro import print_banner
 from cli.onboard import run_onboarding
 from cli.theme import Theme, get_console
 
+# Report generation for terminal conversations (mirrors Feishu bot flow)
+from cli.report_generator import generate_turn_report
+
 
 def _register_live_slash_commands() -> None:
     """Surface the live-trading slash commands in the shared registry.
@@ -712,6 +715,18 @@ def _run_one_turn(user_input: str, ctx: InteractiveContext) -> None:
     if answer:
         ctx.history.append({"role": "assistant", "content": answer})
         _append_message(ctx.session_id or "", "assistant", answer)
+
+        # Generate PDF report after each turn (mirrors Feishu bot flow)
+        try:
+            generate_turn_report(
+                content=answer,
+                title="终端投研报告",
+                stock=user_input[:40],
+                run_id=result.get("run_id"),
+                elapsed_seconds=elapsed,
+            )
+        except Exception as exc:
+            console.print(f"[dim][Report] PDF generation skipped: {exc}[/dim]")
 
     if ctx.debug:
         _print_debug_summary(console, result, elapsed, ctx)

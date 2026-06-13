@@ -32,6 +32,7 @@ from backtest.loaders.registry import (
     resolve_loader,
 )
 from backtest.loaders.base import NoAvailableSourceError
+from backtest.loaders.cache import CachedLoader
 # Symbol classification lives in ``_market_hooks`` so runner.py and
 # composite.py share a single source of truth (audit-2026-05-18 B1+C1+C2).
 # ``_detect_market`` is also re-exported here for back-compat with
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 _VALID_INTERVALS = {"1m", "5m", "15m", "30m", "1H", "4H", "1D"}
 _VALID_ENGINES = {"daily", "options"}
-_VALID_SOURCES = {"tushare", "okx", "yfinance", "akshare", "ccxt", "auto"}
+_VALID_SOURCES = {"tushare", "okx", "yfinance", "akshare", "ccxt", "a_stock_data", "auto"}
 
 
 class BacktestConfigSchema(BaseModel):
@@ -452,6 +453,8 @@ def main(run_dir: Path) -> None:
         config["codes"] = codes
         LoaderCls = _get_loader(source)
         loader = LoaderCls()
+        if config.get("use_cache", True):
+            loader = CachedLoader(loader, refresh_cache=bool(config.get("refresh_cache", False)))
         data_map = loader.fetch(
             codes,
             config.get("start_date", ""),
@@ -468,6 +471,8 @@ def main(run_dir: Path) -> None:
                 fb_loader = LOADER_REGISTRY[fb_name]()
                 if not fb_loader.is_available():
                     continue
+                if config.get("use_cache", True):
+                    fb_loader = CachedLoader(fb_loader, refresh_cache=bool(config.get("refresh_cache", False)))
                 fb_codes = _normalize_codes(codes, fb_name)
                 data_map = fb_loader.fetch(
                     fb_codes, config.get("start_date", ""),
@@ -604,6 +609,8 @@ def _fetch_auto(codes: List[str], config: dict, interval: str = "1D") -> dict:
     merged = {}
     start_date = config.get("start_date", "")
     end_date = config.get("end_date", "")
+    use_cache = bool(config.get("use_cache", True))
+    refresh_cache = bool(config.get("refresh_cache", False))
 
     for market, market_codes in market_groups.items():
         try:
@@ -614,6 +621,9 @@ def _fetch_auto(codes: List[str], config: dict, interval: str = "1D") -> dict:
             logger.warning("Fallback chain failed for %s: %s — trying %s", market, exc, legacy_src)
             LoaderCls = _get_loader(legacy_src)
             loader = LoaderCls()
+
+        if use_cache:
+            loader = CachedLoader(loader, refresh_cache=refresh_cache)
 
         src_name = getattr(loader, "name", "unknown")
         normalized_codes = _normalize_codes(market_codes, src_name)
@@ -628,6 +638,8 @@ def _fetch_auto(codes: List[str], config: dict, interval: str = "1D") -> dict:
                 fb_loader = LOADER_REGISTRY[fb_name]()
                 if not fb_loader.is_available():
                     continue
+                if use_cache:
+                    fb_loader = CachedLoader(fb_loader, refresh_cache=refresh_cache)
                 fb_codes = _normalize_codes(market_codes, fb_name)
                 result = fb_loader.fetch(fb_codes, start_date, end_date, interval=interval)
                 if result:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import json
 import requests
+from pathlib import Path
 from typing import Optional
 
 
@@ -296,13 +297,11 @@ class FeishuClient:
 
         try:
             with open(file_path, "rb") as f:
-                files = {"file": (upload_name, f, "application/octet-stream")}
-                data = {"file_type": "stream", "file_name": upload_name}
                 resp = requests.post(
                     url,
                     headers={"Authorization": f"Bearer {self._get_tenant_access_token()}"},
-                    data=data,
-                    files=files,
+                    data={"file_type": "stream", "file_name": upload_name},
+                    files={"file": (upload_name, f, "application/octet-stream")},
                     timeout=60,
                 )
             resp.raise_for_status()
@@ -313,6 +312,13 @@ class FeishuClient:
                 return file_key
             else:
                 print(f"[FeishuClient] upload failed: {result}")
+        except requests.exceptions.HTTPError as e:
+            print(f"[FeishuClient] upload HTTP error: {e}")
+            try:
+                body = e.response.json()
+                print(f"[FeishuClient] error response body: {json.dumps(body, ensure_ascii=False)}")
+            except Exception:
+                print(f"[FeishuClient] raw response: {e.response.text[:500]}")
         except Exception as e:
             print(f"[FeishuClient] upload exception: {e}")
         return None
